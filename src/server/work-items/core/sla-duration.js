@@ -58,7 +58,17 @@ function durationBodyToMs(datePart, timePart) {
   if (!dayMatch || !timeMatch) {
     return null
   }
-  const components = [dayMatch[1], timeMatch[1], timeMatch[2], timeMatch[3]]
+  // Destructured rather than indexed: the capture-group positions are an
+  // implementation detail of the two regexes above, and naming them here
+  // keeps the sum below readable.
+  const [, dayComponent] = dayMatch
+  const [, hourComponent, minuteComponent, secondComponent] = timeMatch
+  const components = [
+    dayComponent,
+    hourComponent,
+    minuteComponent,
+    secondComponent
+  ]
   if (components.every((component) => component === undefined)) {
     return null
   }
