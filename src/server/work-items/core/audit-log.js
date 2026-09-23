@@ -1,8 +1,6 @@
-import {
-  formatDateGds,
-  formatDateTimeGds
-} from '#/config/nunjucks/filters/format-date.js'
+import { formatDateTimeGds } from '#/config/nunjucks/filters/format-date.js'
 import { nationLabel } from '#/server/work-items/core/nations.js'
+import { slaDeadlineDisplay } from '#/server/work-items/core/sla-duration.js'
 
 /**
  * Audit log helpers (RA-97).
@@ -449,59 +447,6 @@ export function summariseAuditEntry(entry) {
 }
 
 /**
- * Milliseconds represented by an XSD / ISO-8601 duration as .NET's
- * `XmlConvert.ToString(TimeSpan)` writes it — the form every SLA duration
- * in an audit entry's `details` takes.
- *
- * A `TimeSpan` has no calendar component, so the serialised form can only
- * ever carry days, hours, minutes and seconds: anything containing a year
- * or month designator is rejected rather than guessed at, because those
- * are not fixed-length and we would be inventing a date. Returns `null`
- * for an absent, malformed or empty ("P", "PT") duration.
- */
-function parseSlaDurationMs(value) {
-  if (typeof value !== 'string') {
-    return null
-  }
-  const match =
-    /^(-)?P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(
-      value.trim()
-    )
-  if (!match) {
-    return null
-  }
-  const [, sign, days, hours, minutes, seconds] = match
-  if (!days && !hours && !minutes && !seconds) {
-    return null
-  }
-  const ms =
-    Number(days ?? 0) * 86_400_000 +
-    Number(hours ?? 0) * 3_600_000 +
-    Number(minutes ?? 0) * 60_000 +
-    Number(seconds ?? 0) * 1000
-  return sign ? -ms : ms
-}
-
-/**
- * Resolve one half of an SLA-clock snapshot (`startedAt` + `targetDuration`)
- * into the deadline DATE it represents, formatted for display. This is the
- * same sum the backend uses to project `slaDueDate`, so the audit entry and
- * the work item agree. Returns `null` when either half is missing or
- * unparseable so the caller can omit the row entirely.
- */
-function slaDeadlineDisplay(startedAt, targetDuration) {
-  if (!startedAt) {
-    return null
-  }
-  const started = new Date(startedAt)
-  const durationMs = parseSlaDurationMs(targetDuration)
-  if (Number.isNaN(started.getTime()) || durationMs === null) {
-    return null
-  }
-  return formatDateGds(new Date(started.getTime() + durationMs))
-}
-
-/**
  * Project the structured `details` of an audit entry into a list of
  * `{ key, value, multiline? }` rows suitable for rendering inside a
  * disclosure (`<details>` / `govuk-details`). Returns an empty array when
@@ -653,7 +598,7 @@ export function detailRowsForAuditEntry(entry, { payload } = {}) {
       if (typeof details.reason === 'string' && details.reason.trim() !== '') {
         rows.push({
           key: 'Reason for change',
-          value: details.reason.replace(/\r\n/g, '\n'),
+          value: details.reason.replaceAll('\r\n', '\n'),
           multiline: true
         })
       }
