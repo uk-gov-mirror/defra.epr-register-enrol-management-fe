@@ -532,4 +532,71 @@ describe('#workItemAuditLogController', () => {
     expect(result).toEqual(expect.stringContaining('Work item unavailable'))
     expect(result).toEqual(expect.stringContaining('ECONNREFUSED'))
   })
+
+  // RA-572 follow-up. QA reported the mandatory "Reason for change" the
+  // regulator supplies when changing a determination deadline never reached
+  // the Application history. The backend always persisted it on the
+  // `sla-extended` entry's `details`; `detailRowsForAuditEntry` simply had no
+  // case for that action, so the disclosure fell through to the generic
+  // work-item snapshot. Deliberately does NOT assert the entry heading text —
+  // that string is being changed on a separate branch.
+  test('Shows the reason for change and both deadlines for an sla-extended entry', async () => {
+    registerReaccreditation()
+    getWorkItem.mockResolvedValue({
+      ok: true,
+      workItem: aWorkItem({
+        auditLog: [
+          {
+            id: 'dddd4444-dddd-dddd-dddd-dddddddddddd',
+            action: 'sla-extended',
+            actionDisplayName: 'Determination deadline extended',
+            details: {
+              reason: 'Operator needs longer.\nAgreed on the call.',
+              actorUserId: 'alice-1',
+              beforeStartedAt: '2026-04-27T10:00:00.0000000Z',
+              beforeTargetDuration: 'P84D',
+              beforeBreached: 'False',
+              afterStartedAt: '2026-04-27T10:00:00.0000000Z',
+              afterTargetDuration: 'P114D',
+              afterBreached: 'False',
+              additionalDuration: 'P30D'
+            },
+            createdAt: '2026-05-01T09:00:00Z',
+            createdBy: 'alice-1',
+            createdByName: 'Alice Example'
+          }
+        ]
+      })
+    })
+
+    const { statusCode, result } = await server.inject({
+      method: 'GET',
+      url: `/work-items/${ID}/audit-log`
+    })
+
+    expect(statusCode).toBe(statusCodes.ok)
+    expect(result).toEqual(
+      expect.stringContaining('data-testid="work-item-audit-entry-details"')
+    )
+    expect(result).toEqual(expect.stringContaining('Reason for change'))
+    expect(result).toEqual(expect.stringContaining('Operator needs longer.'))
+    expect(result).toEqual(expect.stringContaining('Agreed on the call.'))
+    // Multi-line reasons render paragraph-per-line, not as one run-on line,
+    // and never inside the monospace <pre> reserved for JSON payloads.
+    expect(result).not.toEqual(
+      expect.stringContaining('Operator needs longer.\nAgreed')
+    )
+    expect(result).not.toEqual(
+      expect.stringContaining('data-testid="work-item-audit-entry-detail-pre"')
+    )
+    // The ISO durations are resolved into the dates they represent; the raw
+    // values never reach the page.
+    expect(result).toEqual(expect.stringContaining('Previous deadline'))
+    expect(result).toEqual(expect.stringContaining('20 July 2026'))
+    expect(result).toEqual(expect.stringContaining('New deadline'))
+    expect(result).toEqual(expect.stringContaining('19 August 2026'))
+    expect(result).not.toEqual(expect.stringContaining('P114D'))
+    expect(result).not.toEqual(expect.stringContaining('P30D'))
+    expect(result).toEqual(expect.stringContaining('Changed by'))
+  })
 })

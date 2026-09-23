@@ -1516,3 +1516,180 @@ describe('notificationFailureDetected', () => {
     expect(notificationFailureDetected(auditLog)).toBe(false)
   })
 })
+
+describe('determination-deadline audit entries (RA-572 follow-up)', () => {
+  // `SlaService.AppendAuditEntry` stamps this exact shape. The action id is
+  // the past-tense `sla-extended`, NOT the `sla-extend` transition id.
+  const fullDetails = {
+    reason: 'Operator asked for more time to supply the sampling plan.',
+    actorUserId: 'user-1',
+    beforeStartedAt: '2026-04-27T10:00:00.0000000Z',
+    beforeTargetDuration: 'P84D',
+    beforeBreached: 'False',
+    afterStartedAt: '2026-04-27T10:00:00.0000000Z',
+    afterTargetDuration: 'P114D',
+    afterBreached: 'False',
+    additionalDuration: 'P30D'
+  }
+
+  test('projects previous deadline, new deadline, actor and the reason for change', () => {
+    expect(
+      detailRowsForAuditEntry({
+        action: 'sla-extended',
+        createdBy: 'user-1',
+        createdByName: 'Reg Ulator',
+        details: fullDetails
+      })
+    ).toEqual([
+      { key: 'Previous deadline', value: '20 July 2026' },
+      { key: 'New deadline', value: '19 August 2026' },
+      { key: 'Changed by', value: 'Reg Ulator' },
+      {
+        key: 'Reason for change',
+        value: 'Operator asked for more time to supply the sampling plan.',
+        multiline: true
+      }
+    ])
+  })
+
+  test('preserves a multi-line reason for paragraph-per-line rendering', () => {
+    const reason = 'Line one.\n\nLine two.'
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      createdBy: 'user-1',
+      details: { ...fullDetails, reason }
+    })
+    expect(rows).toContainEqual({
+      key: 'Reason for change',
+      value: reason,
+      multiline: true
+    })
+  })
+
+  test('normalises the CRLF line breaks a browser textarea submits to LF', () => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      createdBy: 'user-1',
+      details: { ...fullDetails, reason: 'Line one.\r\nLine two.' }
+    })
+    expect(rows).toContainEqual({
+      key: 'Reason for change',
+      value: 'Line one.\nLine two.',
+      multiline: true
+    })
+  })
+
+  test('omits the reason row when the stored reason is only whitespace', () => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      createdBy: 'user-1',
+      details: { ...fullDetails, reason: '   ' }
+    })
+    expect(rows.map((row) => row.key)).not.toContain('Reason for change')
+  })
+
+  test('falls back to createdBy when the entry carries no createdByName', () => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      createdBy: 'user-1',
+      details: fullDetails
+    })
+    expect(rows).toContainEqual({ key: 'Changed by', value: 'user-1' })
+  })
+
+  test('omits every row an early-migration entry cannot supply', () => {
+    // A sparse entry: no reason, no duration keys, no actor. Must render
+    // nothing rather than throwing or emitting empty rows.
+    expect(
+      detailRowsForAuditEntry({
+        action: 'sla-extended',
+        details: {
+          actorUserId: 'user-1',
+          beforeStartedAt: '2026-04-27T10:00:00Z',
+          afterStartedAt: '2026-04-27T10:00:00Z'
+        }
+      })
+    ).toEqual([])
+  })
+
+  test('returns an empty array for an sla-extended entry with no details at all', () => {
+    expect(detailRowsForAuditEntry({ action: 'sla-extended' })).toEqual([])
+  })
+
+  test('omits a deadline row whose snapshot is missing its startedAt half', () => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      createdByName: 'Reg Ulator',
+      details: { ...fullDetails, beforeStartedAt: undefined }
+    })
+    expect(rows.map((row) => row.key)).toEqual([
+      'New deadline',
+      'Changed by',
+      'Reason for change'
+    ])
+  })
+
+  test.each([
+    ['an unparseable startedAt', { beforeStartedAt: 'not-a-date' }],
+    ['a non-string duration', { beforeTargetDuration: 84 }],
+    ['a componentless duration', { beforeTargetDuration: 'PT' }],
+    [
+      'a calendar-month duration we refuse to guess at',
+      {
+        beforeTargetDuration: 'P2M'
+      }
+    ],
+    ['a malformed duration', { beforeTargetDuration: '84 days' }]
+  ])('omits the previous-deadline row for %s', (_label, override) => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      details: { ...fullDetails, ...override }
+    })
+    expect(rows.map((row) => row.key)).not.toContain('Previous deadline')
+    expect(rows.map((row) => row.key)).toContain('New deadline')
+  })
+
+  test('adds a time-of-day duration onto the start to resolve the deadline', () => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      details: {
+        ...fullDetails,
+        beforeStartedAt: '2026-04-27T10:00:00Z',
+        beforeTargetDuration: 'P83DT23H59M30S'
+      }
+    })
+    expect(rows[0]).toEqual({ key: 'Previous deadline', value: '20 July 2026' })
+  })
+
+  test('handles a negative duration without inventing a row', () => {
+    const rows = detailRowsForAuditEntry({
+      action: 'sla-extended',
+      details: { ...fullDetails, beforeTargetDuration: '-P1D' }
+    })
+    expect(rows[0]).toEqual({
+      key: 'Previous deadline',
+      value: '26 April 2026'
+    })
+  })
+
+  test('whole entries decorate with the backend-supplied heading untouched', () => {
+    const [decorated] = decorateAuditLog([
+      {
+        id: 'cccc3333-cccc-cccc-cccc-cccccccccccc',
+        action: 'sla-extended',
+        actionDisplayName: 'Determination deadline extended',
+        createdAt: '2026-05-01T09:00:00Z',
+        createdBy: 'user-1',
+        createdByName: 'Reg Ulator',
+        details: fullDetails
+      }
+    ])
+    expect(decorated.summary).toBe('')
+    expect(decorated.isFailure).toBe(false)
+    expect(decorated.detailRows).toContainEqual({
+      key: 'Reason for change',
+      value: fullDetails.reason,
+      multiline: true
+    })
+  })
+})

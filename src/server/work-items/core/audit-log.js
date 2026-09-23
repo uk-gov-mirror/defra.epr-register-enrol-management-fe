@@ -1,4 +1,7 @@
-import { formatDateTimeGds } from '#/config/nunjucks/filters/format-date.js'
+import {
+  formatDateGds,
+  formatDateTimeGds
+} from '#/config/nunjucks/filters/format-date.js'
 import { nationLabel } from '#/server/work-items/core/nations.js'
 
 /**
@@ -107,6 +110,13 @@ const ACTION_NATION_CORRECTED = 'nation-corrected'
 // `query-during-*` transition, carrying the selected sections and the
 // (RA-534: optional) free-text reason in its `details`.
 const ACTION_APPLICATION_QUERIED = 'application-queried'
+// RA-572 follow-up: the entry `SlaService.ExtendAsync` appends when a
+// regulator changes the determination deadline, carrying the mandatory
+// free-text reason plus before/after SLA-clock snapshots in its `details`.
+// NOTE the past tense: the backend action id is `sla-extended`, which
+// deliberately differs from the `sla-extend` transition id the engine
+// projects onto the detail page.
+const ACTION_SLA_EXTENDED = 'sla-extended'
 
 /**
  * Human-readable labels for the query `details.sections` values — the same
@@ -439,6 +449,59 @@ export function summariseAuditEntry(entry) {
 }
 
 /**
+ * Milliseconds represented by an XSD / ISO-8601 duration as .NET's
+ * `XmlConvert.ToString(TimeSpan)` writes it — the form every SLA duration
+ * in an audit entry's `details` takes.
+ *
+ * A `TimeSpan` has no calendar component, so the serialised form can only
+ * ever carry days, hours, minutes and seconds: anything containing a year
+ * or month designator is rejected rather than guessed at, because those
+ * are not fixed-length and we would be inventing a date. Returns `null`
+ * for an absent, malformed or empty ("P", "PT") duration.
+ */
+function parseSlaDurationMs(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const match =
+    /^(-)?P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(
+      value.trim()
+    )
+  if (!match) {
+    return null
+  }
+  const [, sign, days, hours, minutes, seconds] = match
+  if (!days && !hours && !minutes && !seconds) {
+    return null
+  }
+  const ms =
+    Number(days ?? 0) * 86_400_000 +
+    Number(hours ?? 0) * 3_600_000 +
+    Number(minutes ?? 0) * 60_000 +
+    Number(seconds ?? 0) * 1000
+  return sign ? -ms : ms
+}
+
+/**
+ * Resolve one half of an SLA-clock snapshot (`startedAt` + `targetDuration`)
+ * into the deadline DATE it represents, formatted for display. This is the
+ * same sum the backend uses to project `slaDueDate`, so the audit entry and
+ * the work item agree. Returns `null` when either half is missing or
+ * unparseable so the caller can omit the row entirely.
+ */
+function slaDeadlineDisplay(startedAt, targetDuration) {
+  if (!startedAt) {
+    return null
+  }
+  const started = new Date(startedAt)
+  const durationMs = parseSlaDurationMs(targetDuration)
+  if (Number.isNaN(started.getTime()) || durationMs === null) {
+    return null
+  }
+  return formatDateGds(new Date(started.getTime() + durationMs))
+}
+
+/**
  * Project the structured `details` of an audit entry into a list of
  * `{ key, value, multiline? }` rows suitable for rendering inside a
  * disclosure (`<details>` / `govuk-details`). Returns an empty array when
@@ -549,6 +612,50 @@ export function detailRowsForAuditEntry(entry, { payload } = {}) {
       }
       if (typeof details.reason === 'string' && details.reason.trim() !== '') {
         rows.push({ key: 'Reason', value: details.reason, multiline: true })
+      }
+      return rows
+    }
+    case ACTION_SLA_EXTENDED: {
+      // RA-572 follow-up. `SlaService.AppendAuditEntry` stamps the mandatory
+      // `reason` plus before/after snapshots of the SLA clock
+      // (`before|afterStartedAt`, `before|afterTargetDuration`) and an
+      // `additionalDuration`. The three duration values are raw ISO-8601
+      // durations ("P30D") and are NOT rendered: instead the before/after
+      // pairs are resolved into the two actual deadline DATES a caseworker
+      // cares about, the same `startedAt + targetDuration` sum the backend
+      // uses for `slaDueDate`. A pair that is absent or unparseable (early
+      // migration entries) yields no row rather than a wrong or empty one.
+      const rows = []
+      const previousDeadline = slaDeadlineDisplay(
+        details.beforeStartedAt,
+        details.beforeTargetDuration
+      )
+      if (previousDeadline) {
+        rows.push({ key: 'Previous deadline', value: previousDeadline })
+      }
+      const newDeadline = slaDeadlineDisplay(
+        details.afterStartedAt,
+        details.afterTargetDuration
+      )
+      if (newDeadline) {
+        rows.push({ key: 'New deadline', value: newDeadline })
+      }
+      const actor = entry.createdByName ?? entry.createdBy
+      if (actor) {
+        rows.push({ key: 'Changed by', value: actor })
+      }
+      // The reason is the point of the entry, and users paste multi-line
+      // text into the 500-character field, so it renders paragraph-per-line
+      // rather than as one run-on line. Browsers normalise a `<textarea>`'s
+      // line breaks to CRLF on submit, so the stored reason is normalised
+      // back to LF here — the template splits on `\n` and would otherwise
+      // leave a stray carriage return on the end of every paragraph.
+      if (typeof details.reason === 'string' && details.reason.trim() !== '') {
+        rows.push({
+          key: 'Reason for change',
+          value: details.reason.replace(/\r\n/g, '\n'),
+          multiline: true
+        })
       }
       return rows
     }
